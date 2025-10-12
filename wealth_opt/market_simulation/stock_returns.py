@@ -1,12 +1,18 @@
 import numpy as np
 import pandas as pd
 from typing import Tuple
+from wealth_opt.portfolio.assets.stock import Stock
 
-class GBMReturns:
+
+class StockReturns(Stock):
     """
-    Geometric Brownian Motion (GBM) return simulator.
+    Geometric Brownian Motion (GBM) stock return simulator.
 
-    Simulates daily cumulative returns using GBM with drift and volatility.
+    Inherits from `Stock`, and extends it with functionality to simulate
+    daily cumulative returns across multiple Monte Carlo paths.
+
+    Dynamics:
+        dS_t = μ * S_t * dt + σ * S_t * dW_t
     """
 
     def __init__(
@@ -17,7 +23,7 @@ class GBMReturns:
         sigma: float = 0.1,
     ) -> None:
         """
-        Initialize the GBMReturns model.
+        Initialize the StockReturns GBM model.
 
         Parameters
         ----------
@@ -26,27 +32,27 @@ class GBMReturns:
         simulation_days : pd.DatetimeIndex
             Array of simulation dates.
         r : float
-            Drift of the GBM.
+            Expected return (drift).
         sigma : float
-            Volatility of the GBM.
+            Volatility of the stock.
         """
         if simulation_days[0] != as_of_date:
             raise ValueError("as_of_date must equal the first simulation day")
 
+        super().__init__(mu=r, sigma=sigma)  # use Stock constructor
+
         self.as_of_date = as_of_date
         self.simulation_days = simulation_days
-        self.mu = r
-        self.sigma = sigma
-        self.dt = 1 / 252  # daily steps assuming 252 trading days per year
+        self.dt = 1 / 252  # assume 252 trading days per year
 
     def simulate(self, n_sims: int) -> pd.DataFrame:
         """
-        Simulate cumulative returns using GBM.
+        Simulate cumulative returns using GBM dynamics.
 
         Parameters
         ----------
         n_sims : int
-            Number of simulation paths.
+            Number of Monte Carlo simulation paths.
 
         Returns
         -------
@@ -56,13 +62,17 @@ class GBMReturns:
         """
         n_steps = len(self.simulation_days)
         sims = np.zeros((n_steps, n_sims))
-        sims[0, :] = 1.0  # start at 1.0
+        sims[0, :] = 1.0  # start normalized at 1.0
 
-        # Generate random shocks
         for t in range(1, n_steps):
             Z = np.random.normal(size=n_sims)
             sims[t, :] = sims[t - 1, :] * np.exp(
-                (self.mu - 0.5 * self.sigma**2) * self.dt + self.sigma * np.sqrt(self.dt) * Z
+                (self.mu_const - 0.5 * self.sigma_const**2) * self.dt
+                + self.sigma_const * np.sqrt(self.dt) * Z
             )
 
-        return pd.DataFrame(sims, index=self.simulation_days, columns=[f"sim_{i}" for i in range(n_sims)])
+        return pd.DataFrame(
+            sims,
+            index=self.simulation_days,
+            columns=[f"sim_{i}" for i in range(n_sims)],
+        )
