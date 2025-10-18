@@ -19,7 +19,7 @@ class Asset(ABC):
     """
 
     @abstractmethod
-    def mu(self, t: float, x: Any) -> float:
+    def mu(self, t: float) -> float:
         """
         Compute the drift (expected return) of the asset at a given time and state.
 
@@ -38,7 +38,7 @@ class Asset(ABC):
         pass
 
     @abstractmethod
-    def sigma(self, t: float, x: Any) -> float:
+    def sigma(self, t: float) -> float:
         """
         Compute the volatility (diffusion intensity) of the asset at a given time and state.
 

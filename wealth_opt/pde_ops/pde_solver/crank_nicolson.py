@@ -1,49 +1,45 @@
 import numpy as np
-from scipy.sparse import identity
+from scipy.sparse import identity, csc_matrix
 from scipy.sparse.linalg import spsolve
 
-from wealth_opt.pde_ops.operators.infinitesimal_generator import InfGen
 
-
-def crank_nicolson_step(
-    v_next: np.ndarray,
-    inf_gen: InfGen,
-    u: np.ndarray,
-    dt: float
+def crank_nicolson(
+    v_next: np.ndarray, u: np.ndarray, dt: float, cap_a: csc_matrix
 ) -> np.ndarray:
     """
     Perform one Crank–Nicolson step for a linear PDE using the next value v_{n+1}.
 
-    Solves: (I - 0.5*dt*A) v_n = (I + 0.5*dt*A) v_{n+1}
+    Solves:
+        (I - 0.5 * dt * A) v_n = (I + 0.5 * dt * A) v_{n+1}
 
     Parameters
     ----------
     v_next : np.ndarray
-        Value function at next time step v_{n+1}.
-    inf_gen : object
-        Object providing method `matrix(u)` returning sparse PDE matrix.
+        Value function at the next time step v_{n+1}.
     u : np.ndarray
-        Control at current step.
+        Control vector or matrix (not directly used here, but kept for interface consistency).
     dt : float
         Time step size.
+    cap_a : csc_matrix
+        Infinitesimal generator matrix A^u(t, x) in CSC format.
 
     Returns
     -------
     np.ndarray
-        Value function at current time step v_n (same shape as v_next).
+        Value function at the current time step v_n (same shape as v_next).
     """
-    # PDE matrix for current step
-    A = inf_gen.matrix(u)
+    if not isinstance(cap_a, csc_matrix):
+        raise TypeError("cap_a must be a scipy.sparse.csc_matrix")
 
-    # Flatten for sparse solve
-    v_next_flat = v_next.ravel()
+    # Identity matrix of same dimension as A
+    I = identity(cap_a.shape[0], format="csc")
 
-    # LHS and RHS operators
-    I = identity(A.shape[0], format="csc")
-    LHS = (I - 0.5 * dt * A).tocsc()
-    RHS = (I + 0.5 * dt * A).tocsc()
+    # Build LHS and RHS operators
+    LHS = (I - 0.5 * dt * cap_a).tocsc()
+    RHS = (I + 0.5 * dt * cap_a).tocsc()
 
-    # Solve linear system
-    v_n_flat = spsolve(LHS, RHS.dot(v_next_flat))
+    # Solve linear system: LHS * v_n = RHS * v_{n+1}
+    v_n_flat = spsolve(LHS, RHS @ v_next)
 
+    # Reshape back to original grid shape
     return v_n_flat.reshape(v_next.shape)

@@ -1,24 +1,22 @@
-import numpy as np
 import pandas as pd
-from typing import Callable
+from typing import Callable, Dict
 
-from wealth_opt.environment.portfolio_controls import PortfolioControls
-from wealth_opt.environment.portfolio_states import PortfolioStates
 from wealth_opt.hjb_equation.hjb_equation import HJBEquation
 from wealth_opt.pde_ops.operators.infinitesimal_generator import InfGen
-from wealth_opt.portfolio.assets.asset import Asset
 from wealth_opt.portfolio.assets.savings_account import SavingsAccount
 from wealth_opt.portfolio.assets.stock import Stock
 from wealth_opt.portfolio.portfolio import Portfolio
 from wealth_opt.utilities import log_utility, crra
-from wealth_opt.penalties import quadratic_penalty, linear_penalty
-from wealth_opt.market_simulation.stock_returns import StockReturns
+from wealth_opt.penalties import quadratic_penalty
 
 
 class OptimalControl:
     """
-    Holds all parameters, time grids, cashflows, and GBM simulations
-    for a optimal_control simulation environment. No optimization yet.
+    Simulation environment for portfolio optimization.
+
+    Holds all parameters, time grids, deterministic cashflows, and
+    the infinitesimal generator needed for solving HJB equations.
+    Does not perform optimization itself.
     """
 
     def __init__(
@@ -33,81 +31,129 @@ class OptimalControl:
         sigma: float,
         utility: Callable[[float], float] = crra,
         penalty: Callable[[float], float] = quadratic_penalty,
-    ):
+        terminal_target_wealth: float = 0.0,
+    ) -> None:
         """
-        Initialize the optimal_control simulation environment.
+        Initialize the simulation environment.
 
         Parameters
         ----------
         as_of_date : pd.Timestamp
-            Start date of the simulation.
+            Simulation start date.
         simulation_end_date : pd.Timestamp
-            End date of the simulation.
+            Simulation end date.
         retirement_date : pd.Timestamp
-            Retirement date when salary stops and pension starts.
+            Date when salary stops and pension starts.
         monthly_salary : float
-            Monthly salary inflow before retirement.
+            Salary before retirement (per month).
         monthly_pension : float
-            Monthly pension inflow after retirement.
+            Pension after retirement (per month).
         monthly_rent : float
-            Monthly rent outflow.
+            Monthly rent outflow (negative cashflow).
         r : float
-            Risk-free interest rate applied to both savings and GBM drift.
+            Risk-free rate for savings account and drift of risky asset.
         sigma : float
-            Volatility of the risky assets returns.
-        utility : callable
-            Function of daily consumption returning instantaneous utility.
-        penalty : callable
-            Function of terminal wealth returning penalty.
+            Volatility of risky asset returns.
+        utility : Callable[[float], float], optional
+            Instantaneous utility function of consumption (default: CRRA).
+        penalty : Callable[[float], float], optional
+            Terminal wealth penalty function (default: quadratic).
+        terminal_target_wealth : float, optional
+            Target wealth at the terminal time (default: 0.0).
         """
+        # --- Dates & time grids ---
         self.as_of_date: pd.Timestamp = as_of_date
         self.simulation_end_date: pd.Timestamp = simulation_end_date
         self.retirement_date: pd.Timestamp = retirement_date
-        self.monthly_salary: float = monthly_salary
-        self.monthly_pension: float = monthly_pension
-        self.monthly_rent: float = monthly_rent
 
-        self.r: float = r
-        self.sigma: float = sigma
-
-        self.savings = SavingsAccount(r=r)
-        self.stock = Stock(r=r, sigma=sigma)
-        self.portfolio = Portfolio([self.savings, self.stock])
-
-        self.utility: Callable[[float], float] = utility
-        self.penalty: Callable[[float], float] = penalty
-
-        # --- create daily time grid ---
         self.simulation_days: pd.DatetimeIndex = pd.date_range(
             start=as_of_date, end=simulation_end_date, freq="D"
         )
         self.n_days: int = len(self.simulation_days)
+        self.t: pd.Series = (self.simulation_days - self.as_of_date).days / 365.25
 
-        self.t = (self.simulation_days - self.as_of_date).days / 365.25
-
-        self.states = PortfolioStates(n_assets=self.portfolio.n_assets)
-        self.x = self.states.x
-
-        self.controls = PortfolioControls(n_assets=self.portfolio.n_assets)
-
-        self.inf_gen = InfGen(portfolio=self.portfolio)
-
-    def determine_opt_control(self):
-
-
-        hjb_equation = HJBEquation(
-            t= self.t,
-            x=self.x,
-            u= self.controls,
-            f=self.utility,
-            phi=self.penalty,
-            inf_gen=self.inf_gen
+        self.monthly_grid: pd.DatetimeIndex = pd.date_range(
+            start=as_of_date, end=simulation_end_date, freq="M"
         )
 
+        # --- Cashflows ---
+        self.monthly_salary: float = monthly_salary
+        self.monthly_pension: float = monthly_pension
+        self.monthly_rent: float = monthly_rent
+
+        self.salary_cf: pd.Series = self._rollout_salary()
+        self.rent_cf: pd.Series = self._rollout_rent()
+        self.deterministic_cashflows: Dict[int, float] = self._deterministic_cashflows()
+
+        # --- Assets & portfolio ---
+        self.r: float = r
+        self.sigma: float = sigma
+
+        self.savings: SavingsAccount = SavingsAccount(r=r)
+        self.stock: Stock = Stock(r=r, sigma=sigma)
+        self.portfolio: Portfolio = Portfolio([self.savings, self.stock])
+
+        self.utility: Callable[[float], float] = utility
+        self.penalty: Callable[[float], float] = penalty
+        self.terminal_target_wealth: float = terminal_target_wealth
+
+        # --- Infinitesimal generator ---
+        self.inf_gen: InfGen = InfGen(portfolio=self.portfolio)
+
+    # -------------------------------------------------------------------------
+    def _rollout_salary(self) -> pd.Series:
+        """Roll out salary/pension over the monthly grid."""
+        inflow = [
+            self.monthly_salary if date < self.retirement_date else self.monthly_pension
+            for date in self.monthly_grid
+        ]
+        return pd.Series(inflow, index=self.monthly_grid, name="salary_pension_cf")
+
+    # -------------------------------------------------------------------------
+    def _rollout_rent(self) -> pd.Series:
+        """Roll out constant negative rent over the monthly grid."""
+        rent_outflow = [-self.monthly_rent] * len(self.monthly_grid)
+        return pd.Series(rent_outflow, index=self.monthly_grid, name="rent_cf")
+
+    # -------------------------------------------------------------------------
+    def _deterministic_cashflows(self) -> Dict[int, float]:
+        """
+        Combine salary/pension and rent into a daily-indexed cashflow dict.
+
+        Returns
+        -------
+        Dict[int, float]
+            Keys: integer index of simulation day.
+            Values: net deterministic cashflow at that day.
+        """
+        net_cf = self.salary_cf + self.rent_cf
+        cashflow_dict: Dict[int, float] = {}
+
+        for date, value in net_cf.items():
+            idx = (abs(self.simulation_days - date)).argmin()
+            cashflow_dict[idx] = cashflow_dict.get(idx, 0.0) + value
+
+        return cashflow_dict
+
+    # -------------------------------------------------------------------------
+    def determine_opt_control(self) -> None:
+        """
+        Solve the HJB equation for the given deterministic cashflows,
+        portfolio, and utility/penalty specification.
+        """
+        hjb_equation = HJBEquation(
+            t=self.t,
+            utility=self.utility,
+            penalty=self.penalty,
+            inf_gen=self.inf_gen,
+            n_assets=self.portfolio.n_assets,
+            cashflows=self.deterministic_cashflows,
+            x_target=self.terminal_target_wealth,
+        )
         hjb_equation.solve()
 
 
-
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
     optimal_control = OptimalControl(
         as_of_date=pd.Timestamp("2025-01-01"),
@@ -119,9 +165,7 @@ if __name__ == "__main__":
         r=0.01,
         sigma=0.15,
         utility=log_utility,
-        penalty=linear_penalty,
+        penalty=quadratic_penalty,
     )
 
     optimal_control.determine_opt_control()
-
-

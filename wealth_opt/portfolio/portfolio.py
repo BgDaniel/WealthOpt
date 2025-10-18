@@ -4,12 +4,14 @@ from typing import List
 
 from wealth_opt.portfolio.assets.asset import Asset
 
+Weights = List[np.ndarray]
+
 
 class Portfolio(ABC):
     """
     Abstract base class representing a portfolio (control) of tradable assets.
 
-    A portfolio combines multiple assets with given allocation weights or portfolio_control.
+    A portfolio combines multiple assets with given allocation weights.
     The portfolio’s drift and volatility are derived from the dynamics of its constituent assets.
 
     Attributes
@@ -26,71 +28,78 @@ class Portfolio(ABC):
         ----------
         assets : List[Asset]
             List of asset instances composing the portfolio.
+
+        Raises
+        ------
+        ValueError
+            If the list of assets is empty.
         """
         if not assets:
             raise ValueError("Portfolio must contain at least one asset.")
-        self.assets = assets
+        self.assets: List[Asset] = assets
 
-    # --- Utility Property ---
+    # -------------------------------------------------------------------------
     @property
     def n_assets(self) -> int:
-        """Return the number of assets in the portfolio."""
+        """
+        Return the number of assets in the portfolio.
+
+        Returns
+        -------
+        int
+            Number of assets.
+        """
         return len(self.assets)
 
-    # --- Drift (μ_P) ---
-    def mu(self, t: float, x: float, u: np.ndarray, c: float) -> float:
+    # -------------------------------------------------------------------------
+    def mu(self, t: float, x: np.ndarray, u: Weights, c: np.ndarray) -> np.ndarray:
         """
-        Compute the portfolio drift μ_P(t, x, u, c).
-
-        The drift represents the expected rate of change of wealth:
-            μ_P(t, x, u, c) = x * Σ_i [u_i * μ_i(t, x)] - c
+        Compute the portfolio drift at given time and state for control u.
 
         Parameters
         ----------
         t : float
             Current time.
-        x : float
-            Current portfolio wealth (state variable).
-        u : np.ndarray
-            Control (allocation) vector for the assets.
-        c : float
-            Instantaneous consumption rate.
+        x : np.ndarray
+            1D array of wealth or state values.
+        u : Weights
+            List of arrays representing the control weights for each asset.
+            Each element must have the same shape as `x`.
+        c : np.ndarray
+            Consumption array to subtract from drift, same shape as `x`.
 
         Returns
         -------
-        float
-            Portfolio drift value.
+        np.ndarray
+            Portfolio drift at each point in `x`.
         """
-        if len(u) != self.n_assets:
-            raise ValueError("Control vector 'u' must match the number of assets in the portfolio.")
+        mu_vals = np.zeros_like(x)
+        for i_asset in range(len(self.assets)):
+            mu_vals += self.assets[i_asset].mu(t) * x * u[i_asset]
+        mu_vals -= c
+        return mu_vals
 
-        mu_vals = np.array([asset.mu(t, x) for asset in self.assets])
-        return x * np.dot(u, mu_vals) - c
-
-    # --- Volatility (σ_P) ---
-    def sigma(self, t: float, x: float, u: np.ndarray) -> float:
+    # -------------------------------------------------------------------------
+    def sigma(self, t: float, x: np.ndarray, u: Weights) -> np.ndarray:
         """
-        Compute the portfolio volatility σ_P(t, x, u).
-
-        Assuming asset returns are independent, the portfolio volatility is:
-            σ_P(t, x, u) = x * sqrt(Σ_i [u_i² * σ_i(t, x)²])
+        Compute the portfolio volatility at given time and state for control u.
 
         Parameters
         ----------
         t : float
             Current time.
-        x : float
-            Current portfolio wealth.
-        u : np.ndarray
-            Control (allocation) vector for the assets.
+        x : np.ndarray
+            1D array of wealth or state values.
+        u : Weights
+            List of arrays representing the control weights for each asset.
+            Each element must have the same shape as `x`.
 
         Returns
         -------
-        float
-            Portfolio volatility value.
+        np.ndarray
+            Portfolio volatility at each point in `x`.
         """
-        if len(u) != self.n_assets:
-            raise ValueError("Control vector 'u' must have the same length as the number of assets.")
-
-        sigmas = np.array([asset.sigma(t, x) for asset in self.assets])
-        return x * np.sqrt(np.dot(u**2, sigmas**2))
+        sigma_vals = np.zeros_like(x)
+        for i_asset in range(len(self.assets)):
+            sigma_vals += self.assets[i_asset].sigma(t) * x * u[i_asset]
+        return sigma_vals

@@ -26,7 +26,7 @@ class SavingsAccount(Asset):
         self._r = r
 
     # --- Drift (μ) ---
-    def mu(self, t: float, x: float) -> float:
+    def mu(self, t: float) -> float:
         """
         Return the drift of the savings account at a given time and state.
 
@@ -48,7 +48,7 @@ class SavingsAccount(Asset):
         return self._r
 
     # --- Volatility (σ) ---
-    def sigma(self, t: float, x: float) -> float:
+    def sigma(self, t: float) -> float:
         """
         Return the volatility of the savings account.
 

@@ -31,7 +31,7 @@ class Stock(Asset):
         self._sigma = sigma
 
     # --- Drift (μ) ---
-    def mu(self, t: float, x: float) -> float:
+    def mu(self, t: float) -> float:
         """
         Compute the drift of the stock at a given time and state.
 
@@ -53,7 +53,7 @@ class Stock(Asset):
         return (self._r - self._sigma**2 / 2.0) * t
 
     # --- Volatility (σ) ---
-    def sigma(self, t: float, x: float) -> float:
+    def sigma(self, t: float) -> float:
         """
         Return the constant volatility of the stock.
 

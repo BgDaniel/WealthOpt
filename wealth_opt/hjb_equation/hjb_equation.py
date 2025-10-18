@@ -1,97 +1,148 @@
 import numpy as np
-from typing import Callable, List
-from wealth_opt.environment.interfaces.controls import Controls
-from wealth_opt.environment.interfaces.states import Coords
+from typing import Callable, Dict, List
+from scipy.sparse import csc_matrix
+
 from wealth_opt.pde_ops.operators.infinitesimal_generator import InfGen
-from wealth_opt.pde_ops.pde_solver.crank_nicolson import crank_nicolson_step
+from wealth_opt.pde_ops.pde_solver.crank_nicolson import crank_nicolson
+
 
 
 class HJBEquation:
     """
-    General representation of a Hamilton–Jacobi–Bellman (HJB) equation.
+    Hamilton–Jacobi–Bellman (HJB) equation solver using Crank–Nicolson
+    for PDE steps and policy iteration for portfolio controls.
 
-    dV/dt + sup_u [ f(t, x, u) + A^u V(t, x) ] = 0
+    Solves:
+        dV/dt + sup_u [ f(t, x, u) + A^u V(t, x) ] = 0
     with terminal condition V(T, x) = phi(x).
 
     Attributes
     ----------
     t : np.ndarray
-        Time grid.
-    x : Coords
-        State space mesh (list of ndarrays).
-    u : Controls
-        Portfolio control object.
-    f : Callable
-        Reward function: f(t, x, u) -> ndarray.
-    phi : Callable
-        Terminal condition: phi(x) -> ndarray.
+        1D array of time grid points.
+    x : np.ndarray
+        1D spatial grid for wealth.
+    n_x : int
+        Number of spatial points.
     v : np.ndarray
-        Value function array with shape (len(t), *spatial_shape).
+        Value function array with shape (len(t), n_x).
+    u_0 : List[np.ndarray]
+        Initial control guess per asset.
+    c_0 : np.ndarray
+        Initial consumption or auxiliary control (if any).
+    utility : Callable
+        Instantaneous reward function.
+    penalty : Callable
+        Terminal wealth penalty function.
+    inf_gen : InfGen
+        Infinitesimal generator providing A^u matrices.
+    n_assets : int
+        Number of assets in the portfolio.
+    cashflows : Dict[int, np.ndarray]
+        Deterministic cashflows indexed by time-step.
+    x_target : float
+        Target wealth at terminal time.
+    dx : float
+        Grid spacing in wealth.
+    x_max : float
+        Maximum wealth for grid.
     """
 
     def __init__(
         self,
         t: np.ndarray,
-        x: Coords,
-        u: Controls,
-        f: Callable,
-        phi: Callable,
-        inf_gen: InfGen
+        utility: Callable[[float, np.ndarray, Controls], np.ndarray],
+        penalty: Callable[[np.ndarray, float], np.ndarray],
+        inf_gen: InfGen,
+        n_assets: int,
+        cashflows: Dict[int, np.ndarray],
+        x_target: float = 0.0,
+        dx: float = 10.0,
+        x_max: float = 100000.0,
     ) -> None:
-        self.t = np.asarray(t)
-        self.n_times = len(self.t)
+        self.t: np.ndarray = np.asarray(t)
+        self.n_times: int = len(self.t)
 
-        self.x = x
-        self.u = u
-        self.f = f
-        self.phi = phi
-        self.ing_gen = inf_gen
+        self.utility: Callable[[float, np.ndarray, Controls], np.ndarray] = utility
+        self.penalty: Callable[[np.ndarray, float], np.ndarray] = penalty
+        self.inf_gen: InfGen = inf_gen
+        self.n_assets: int = n_assets
+        self.cashflows: Dict[int, np.ndarray] = cashflows
+        self.x_target: float = x_target
 
-        spatial_shape = self.x[0].shape  # shape of a single mesh dimension
-        self.v = np.zeros((len(self.t),) + spatial_shape, dtype=float)
+        self.dx: float = dx
+        self.x_max: float = x_max
 
+        self.x: np.ndarray = np.arange(0.0, self.x_max, self.dx)
+        self.n_x: int = len(self.x)
+
+        self.v: np.ndarray = np.zeros((self.n_times, self.n_x))
+
+        # Initial guess for control (equal weights)
+        self.u_0: List[np.ndarray] = [
+            np.full(self.n_x, 1.0 / self.n_assets) for _ in range(self.n_assets)
+        ]
+        self.c_0: np.ndarray = np.zeros(self.n_x)
+
+    # -------------------------------------------------------------------------
     def solve(
         self,
         tol_v: float = 1e-6,
         tol_u: float = 1e-5,
         max_policy_iter: int = 20,
-        max_pde_iter: int = 100
+        max_pde_iter: int = 100,
     ) -> np.ndarray:
         """
-        Solve the HJB using Crank–Nicolson in time and policy (u) iteration.
+        Solve the HJB equation via backward time-stepping with
+        Crank–Nicolson PDE steps and policy iteration.
+
+        Parameters
+        ----------
+        tol_v : float, optional
+            Tolerance for value function convergence.
+        tol_u : float, optional
+            Tolerance for policy (control) convergence.
+        max_policy_iter : int, optional
+            Maximum iterations for control improvement per time step.
+        max_pde_iter : int, optional
+            Maximum iterations for PDE solver (unused here but for extensibility).
 
         Returns
         -------
         np.ndarray
-            Value function array v(t, x).
+            Value function array v(t, x) of shape (len(t), n_x).
         """
-        # Terminal condition at t = T
-        self.v[-1, ...] = self.phi(self.x)
+        # Terminal condition at final time
+        self.v[-1, ...] = self.penalty(self.x, target=self.x_target)
 
         # Backward time-stepping
         for n in range(self.n_times - 2, -1, -1):
-            t_n, t_np1 = self.t[n], self.t[n + 1]
-            dt = t_np1 - t_n
-            v_next = self.v[n + 1, ...]
-            v_current = v_next.copy()
+            t_m, t_n = self.t[n], self.t[n + 1]
+            dt: float = t_n - t_m
 
-            # Initialize control (e.g., static/default control)
-            u_current = self.u.static_controls()
+            v_next: np.ndarray = self.v[n + 1, ...]
+            v_current: np.ndarray = v_next.copy()
+
+            # Initialize control
+            u_current: List[np.ndarray] = self.u_0
+            c_current: np.ndarray = self.c_0
 
             for policy_iter in range(max_policy_iter):
-                inf_gen = self.inf_gen.get(t_n, self.x, u_current)
+                cap_a: csc_matrix = self.inf_gen.matrix(t_m, self.x, u_current)
 
-                # 1️⃣ PDE step (Crank–Nicolson) for fixed control
-                v_new = crank_nicolson_step(
-                    v_next, inf_gen, u_current, dt
+                # PDE step (Crank–Nicolson)
+                v_new: np.ndarray = crank_nicolson(v_next, u_current, dt, cap_a)
+
+                # Policy improvement step
+                u_new: List[np.ndarray] = self._update_optimal_controls(t_m, v_new)
+
+                # Check convergence of control
+                du: float = np.max(
+                    [
+                        np.nanmax(np.abs(mesh_new - mesh_old))
+                        for mesh_new, mesh_old in zip(u_new, u_current)
+                    ]
                 )
-
-                # 2️⃣ Policy improvement step
-                u_new = self._update_optimal_controls(t_n, v_new)
-
-                # 3️⃣ Check control convergence
-                du = np.max([np.nanmax(np.abs(mesh_new - mesh_old))
-                             for mesh_new, mesh_old in zip(u_new, u_current)])
                 if du < tol_u:
                     u_current = u_new
                     v_current = v_new
@@ -106,11 +157,7 @@ class HJBEquation:
 
         return self.v
 
-    def _update_optimal_controls(
-        self,
-        t_n: float,
-        v_n: np.ndarray
-    ) -> Coords:
+    def _update_optimal_controls(self, t_n: float, v_n: np.ndarray) -> Coords:
         """
         Compute optimal control u*(x) = argmax_u [ f + A^u V_n ].
 
@@ -128,7 +175,7 @@ class HJBEquation:
         """
         # Example: use uniform weights and mean asset values as reference
         current_u = np.ones(self.u.dim) / self.u.dim
-        current_S = np.mean([mesh for mesh in self.x], axis=0)
+        current_S = np.mean([mesh for mesh in self.states], axis=0)
 
         # Get admissible controls as mesh
         valid_controls = self.u.admissible_controls(current_u, current_S)
@@ -142,9 +189,9 @@ class HJBEquation:
         h_values = []
         for u_val_idx in np.ndindex(valid_controls[0].shape):
             u_val = np.array([mesh[u_val_idx] for mesh in valid_controls])
-            h = self.f(t_n, self.x, u_val)
+            h = self.utility(t_n, self.states, u_val)
             if self.a is not None:
-                h += self.a.get(v_n, t_n, self.x, u_val)
+                h += self.a.construct_generator_matrix(v_n, t_n, self.states, u_val)
             h_values.append(h)
 
         h_stack = np.stack(h_values, axis=0)  # shape = (n_controls, *spatial_shape)

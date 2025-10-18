@@ -1,85 +1,106 @@
 import numpy as np
 from scipy.sparse import diags, csc_matrix
-from typing import Union
+from typing import Literal
 
 from wealth_opt.portfolio.portfolio import Portfolio
 
 
 class InfGen:
     """
-    Infinitesimal generator (differential operator) for a given optimal_control.
+    Infinitesimal generator (differential operator) for a given portfolio control.
 
-    For a optimal_control with dynamics:
+    For a controlled SDE of the form:
         dX_t = μ(t, X_t, u) dt + σ(t, X_t, u) dW_t
 
-    The operator acts as:
+    The infinitesimal generator acts as:
         (A f)(t, x) = μ(t, x, u) ∂f/∂x + 0.5 σ(t, x, u)^2 ∂²f/∂x²
+
+    Attributes
+    ----------
+    portfolio : Portfolio
+        Portfolio object providing drift μ and volatility σ methods.
     """
 
-    def __init__(self, portfolio: Portfolio):
-        self.portfolio = portfolio
+    def __init__(self, portfolio: Portfolio) -> None:
+        """
+        Initialize the infinitesimal generator for a given portfolio.
 
-    def get(
+        Parameters
+        ----------
+        portfolio : Portfolio
+            Portfolio object containing assets and their dynamics.
+        """
+        self.portfolio: Portfolio = portfolio
+
+    # -------------------------------------------------------------------------
+    def matrix(
         self,
         t: float,
         x: np.ndarray,
         u: np.ndarray,
         c: float = 0.0,
-        bc: str = "neumann",
+        bc: Literal["dirichlet", "neumann"] = "neumann",
     ) -> csc_matrix:
         """
-        Construct the discrete generator matrix A^u(t, x) for a 1D mesh.
+        Construct the finite-difference approximation of the generator matrix A^u(t, x)
+        for a 1D spatial mesh.
 
         Parameters
         ----------
         t : float
-            Time at which to evaluate μ, σ.
+            Time at which to evaluate μ and σ.
         x : np.ndarray
-            1D array of spatial grid points.
+            1D array of spatial grid points (must be uniform).
         u : np.ndarray
-            Control vector (optimal_control weights). Must match number of assets.
+            Control array of shape (n_assets, len(x)), specifying the portfolio weights
+            or control values for each asset at each spatial point.
         c : float, optional
-            Consumption rate (used in μ).
-        bc : str, optional
-            Boundary condition ('dirichlet' or 'neumann').
+            Consumption or additional drift term (default: 0.0).
+        bc : {'dirichlet', 'neumann'}, optional
+            Boundary condition type:
+                - 'dirichlet' : fixed value at boundaries.
+                - 'neumann'   : zero-gradient (reflecting) at boundaries.
 
         Returns
         -------
         csc_matrix
-            Sparse finite-difference matrix representing A^u(t, x).
+            Sparse CSC matrix representing the discrete infinitesimal generator
+            for the given control and grid.
         """
-
-        if len(u) != self.portfolio.n_assets:
+        n: int = len(x)
+        dx: float = np.diff(x)[0]
+        if not np.allclose(np.diff(x), dx):
             raise ValueError(
-                f"Control vector u must have length {self.portfolio.n_assets}, "
-                f"but got {len(u)}"
+                "Grid x must be uniform for this finite-difference scheme."
             )
 
-        n = len(x)
-        dx = np.diff(x)
-        if not np.allclose(dx, dx[0]):
-            raise ValueError("Grid x must be uniform for this simple scheme.")
-        dx = dx[0]
+        # Validate control array shape
+        if len(u) != self.portfolio.n_assets:
+            raise ValueError(
+                f"Control array u must have length equal to number of assets "
+                f"({self.portfolio.n_assets}), but got {len(u)}."
+            )
+        if not all(u[i].shape == x.shape for i in range(self.portfolio.n_assets)):
+            raise ValueError("Each u[i] must have the same shape as x.")
 
-        # Compute local coefficients
-        mu_vals = np.array([self.portfolio.mu(t, xi, u, c) for xi in x])
-        sigma_vals = np.array([self.portfolio.sigma(t, xi, u) for xi in x])
-        diff_coeff = 0.5 * sigma_vals**2
+        # Compute drift and diffusion coefficients
+        mu_vals: np.ndarray = self.portfolio.mu(t, x, u, c)
+        sigma_vals: np.ndarray = self.portfolio.sigma(t, x, u)
+        diff_coeff: np.ndarray = 0.5 * sigma_vals**2
 
-        # --- Finite differences ---
-        main_diag = np.zeros(n)
-        upper_diag = np.zeros(n - 1)
-        lower_diag = np.zeros(n - 1)
+        # Initialize finite-difference diagonals
+        main_diag: np.ndarray = np.zeros(n)
+        upper_diag: np.ndarray = np.zeros(n - 1)
+        lower_diag: np.ndarray = np.zeros(n - 1)
 
         for i in range(1, n - 1):
             mu = mu_vals[i]
             a = diff_coeff[i]
-
             lower_diag[i - 1] += a / dx**2 - mu / (2 * dx)
-            main_diag[i]      += -2 * a / dx**2
-            upper_diag[i]     += a / dx**2 + mu / (2 * dx)
+            main_diag[i] += -2 * a / dx**2
+            upper_diag[i] += a / dx**2 + mu / (2 * dx)
 
-        # --- Boundary conditions ---
+        # Apply boundary conditions
         if bc == "dirichlet":
             main_diag[0] = main_diag[-1] = 1.0
         elif bc == "neumann":
@@ -87,9 +108,8 @@ class InfGen:
             upper_diag[0] = 2 * diff_coeff[0] / dx**2
             lower_diag[-1] = 2 * diff_coeff[-1] / dx**2
         else:
-            raise ValueError("Unknown boundary condition type.")
+            raise ValueError(f"Unknown boundary condition type: {bc}")
 
+        # Assemble sparse matrix
         diagonals = [lower_diag, main_diag, upper_diag]
-        A_mat = diags(diagonals, offsets=[-1, 0, 1], format="csc")
-
-        return A_mat
+        return diags(diagonals, offsets=[-1, 0, 1], format="csc")
